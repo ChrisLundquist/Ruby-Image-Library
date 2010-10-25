@@ -90,6 +90,7 @@ class JPEG
             when DEFINE_RESTART_INTERVAL
             when START_OF_SCAN
                 puts "start of scan"
+                @scan = read_entropy_encoded_segment()
             when RESTART
             when APPLICATION_SPECIFIC  # 224..240
                 puts "app specific"
@@ -116,6 +117,28 @@ class JPEG
         return data
     end
 
+    def read_entropy_encoded_segment
+        puts "reading entropy data"
+        data = []
+
+        previous_byte = 0x00
+        while byte = @file.getbyte
+            if previous_byte == 0xff
+                if byte == 0x00
+                    # Check if the byte escaped with a trailing 0 and skip the 0 if so
+                    byte = @file.getbyte
+                else
+                    # We have another marker for a segment
+                    @file.seek(-2,IO::SEEK_CUR) # Back the file up, we found another marker
+                    return data[0..data.length - 2] # -2 so we don't append 0xFF 0xmarker 
+                end
+            end
+            data << byte
+            previous_byte = byte
+        end
+        return data
+    end
+
     def parse_start_of_frame
         puts "parsing start of frame"
         # Sample input for @start_of_frame
@@ -136,13 +159,20 @@ class JPEG
                        else
                            :unkown
                        end
-        @start_of_frame[6..-1].each_slice(3) do |component_id, sample_factors, quantization_table_id|
+        @sample_ratios = Hash.new
+
+        # helper function that unpacks the sample ratio
         # sampling factors (bit 0-3 vert., 4-7 hor.)
+        get_sample_ratio = lambda { |sample_byte| return Rational(sample_byte & 0x0F, sample_byte & 0xF0 >> 4) } 
+
+        @start_of_frame[6..-1].each_slice(3) do |component_id, sample_factors, quantization_table_id|
             case component_id 
             when 1 # Y
-                luminance_sample_ratio = Rational(sample_factors & 0x0F, sample_factors & 0xF0) 
+                @sample_ratios[:y]  = get_sample_ratio.call(sample_factors)
             when 2 # Cb
+                @sample_ratios[:cb] = get_sample_ratio.call(sample_factors) 
             when 3 # Cr
+                @sample_ratios[:cr] = get_sample_ratio.call(sample_factors) 
             when 4 # I ????
             when 5 # Q ????
             else 
@@ -155,6 +185,7 @@ class JPEG
     end
 
     def parse_quantization_tables
+        puts @quantization_tables.inspect
     end
 
     def get_start_of_scan
