@@ -1,3 +1,4 @@
+require 'btree'
 class JPEG
     FILE_MAGIC_NUMBER = [0xFF,0xD8]    # to validate we are opening a JPEG file
     START_OF_IMAGE = 0xD8              # File magic Number
@@ -206,9 +207,22 @@ class JPEG
             ac_table = (table.first & 0x10) > 0
             table_type = ac_table ? :ac : :dc
             tables[table_type][table_id] = { :frequency_table => table[1..16], :data => table[17..-1] }
+
+
+            # I don't know how many bytes each codeword represents going to guess it's a char
+            data = tables[table_type][table_id][:data]
+            tables[table_type][table_id][:tree] = {0 => {}, 1 => {}}
+            tables[table_type][table_id][:frequency_table].each_with_index do |count, code_word_size|
+                count.times do
+
+                end
+
+
+            end
         end
         @huffman_tables = tables
     end
+
 
     def parse_quantization_tables
         #NOTE
