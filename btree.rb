@@ -3,17 +3,21 @@ class JPEG
         attr_accessor :root
 
         def initialize(frequencies, values)
-            values.flatten!
-
             @root = Node.new
 
-            frequencies.each_with_index do |freq_count, row|
-                puts "row: " + row.to_s
+            frequencies.each do |freq_count|
                 row_values = values.shift(freq_count)
-                puts "values: " + row_values.inspect
-                init_row(row, row_values)
+                row_values.each do |i|
+                    insert(i)
+                end
+                extend_tree()
             end
         end
+
+        def to_h
+            @root.build_hash("")
+        end
+
 
         def [](index)
             #index = index.unpack("B*").first unless index =~ /\A[01]+\Z/
@@ -39,7 +43,7 @@ class JPEG
                     raise ArgumentError.new("'#{index.inspect}' is not a binary string")
                 end
             end
-            return here.value
+            return here
         end
 
         def []=(index, value)
@@ -84,72 +88,130 @@ class JPEG
             end
             return count
         end
-        private
-
-        def init_row(row, values)
-            raise "Too many values for row" if values.length > 2**row
-
-            # Fill values left to right
-            values.each_with_index do |v, i|
-                #FIXME
-                node_index = "%0#{row}b" % i # We want a binary string of row length i.e. for row 3 "000", "001", "010"
-                puts node_index
-                self[node_index] = v
+       
+        # adds a value to the true in the left most free position
+        # NOTE: if there are no free positions we throw an exception
+        #       this method will not insert to complete trees
+        def insert(value)
+            node = @root.free_node()
+            raise "no more free nodes" unless node
+            if node.left.nil?
+                node.left = value
+            elsif node.right.nil?
+                node.right = value
+            else
+                raise "freenode returned non freenode"
             end
         end
+        alias :<< :insert
 
+        def extend_tree
+            @root.extend_tree()
+        end
+
+#        def init_row(row, values)
+#            raise "Too many values for row" if values.length > 2**row
+#
+#            # Fill values left to right
+#            values.each_with_index do |v, i|
+#                #FIXME
+#                node_index = "%0#{row}b" % i # We want a binary string of row length i.e. for row 3 "000", "001", "010"
+#                puts node_index
+#                self[node_index] = v
+#            end
+#        end
 
         class Node
             attr_reader :left
             attr_reader :right
             attr_reader :value
 
-            def left=(node)
-                #raise "Node already has a value" if @value
-                #raise "Not a node unless" unless node.is_a?(self.class)
-                @left = node
+#            def left=(node)
+#                #raise "Node already has a value" if @value
+#                #raise "Not a node unless" unless node.is_a?(self.class)
+#                @left = node
+#            end
+#
+#            def right=(node)
+#                #raise "Node already has a value" if @value
+#                #raise "Not a node unless" unless node.is_a?(self.class)
+#                @right = node
+#            end
+#
+#            def value=(v)
+#                #raise "Node already has children" if @left or @right
+#                @value = v
+#            end
+
+            def to_h
+                return {
+                    "0" => @left.is_a?(self.class) ? @left.to_h : @left,
+                    "1" => @right.is_a?(self.class) ? @right.to_h : @right
+                }
             end
 
-            def right=(node)
-                #raise "Node already has a value" if @value
-                #raise "Not a node unless" unless node.is_a?(self.class)
-                @right = node
-            end
+            def build_hash(prefix)
+                h = Hash.new
 
-            def value=(v)
-                #raise "Node already has children" if @left or @right
-                @value = v
+                [@left, @right].each_with_index do |side, path|
+                    if side.is_a?(self.class)
+                        h.merge!(side.build_hash(prefix + path.to_s))
+                    else
+                        h[prefix + path.to_s] = side
+                    end
+                end
+                return h
             end
 
             def leaf?
                 return @left.nil? && @right.nil?
             end
 
-            def each_node(&b)
-                if @value
-                    b.call(self)
+            def free_node
+                return self if @left.nil? || @right.nil?
+
+                [@left, @right].each do |side|
+                    if @left.is_a?(self.class)
+                        next_free_node = side.free_node
+                        return next_free_node if next_free_node
+                    end
                 end
-                if @left
-                    @left.each_node(&b)
+                return false
+            end
+
+            def extend_tree
+                if @left.nil?
+                    @left = Node.new
+                elsif @left.is_a?(self.class)
+                    @left.extend_tree()
                 else
-                    b.call(nil) # Since we create nodes lazily, the value, left and right may all be nil
+                    #its data
                 end
 
-                if @right
-                    @right.each_node(&b)
+                if @right.nil?
+                    @right = Node.new
+                elsif @right.is_a?(self.class)
+                    @right.extend_tree()
                 else
-                    b.call(nil)
+                    #its data
                 end
             end
 
-            def each(&b)
-                each_node do |node|
-                    b.call(node.value)
+            def each_node(&b)
+                if @left.is_a?(self.class)
+                    @left.each_node(&b)
+                else
+                    b.call(@left)
+                end
+                if @right.is_a?(self.class)
+                    @right.each_node(&b)
+                else
+                    b.call(@right)
                 end
             end
 
             def depth
-                return [@left ? @left.depth : 0, @right ? @right.depth : 0].max + 1
+                return [@left.is_a?(self.class) ? @left.depth : 0, @right.is_a?(self.class) ? @right.depth : 0].max + 1
             end
         end
     end
