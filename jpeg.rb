@@ -1,4 +1,3 @@
-require 'btree'
 class JPEG
     FILE_MAGIC_NUMBER = [0xFF,0xD8]    # to validate we are opening a JPEG file
     START_OF_IMAGE = 0xD8              # File magic Number
