@@ -206,21 +206,29 @@ class JPEG
             table_id = table.first & 0x07 # this SHOULD be 0..3 but sometimes adobe does what they want
             ac_table = (table.first & 0x10) > 0
             table_type = ac_table ? :ac : :dc
-            tables[table_type][table_id] = { :frequency_table => table[1..16], :data => table[17..-1] }
-
-
-            # I don't know how many bytes each codeword represents going to guess it's a char
-            data = tables[table_type][table_id][:data]
-            tables[table_type][table_id][:tree] = {0 => {}, 1 => {}}
-            tables[table_type][table_id][:frequency_table].each_with_index do |count, code_word_size|
-                count.times do
-
-                end
-
-
-            end
+            tables[table_type][table_id] = build_huffman_hash(table[1..16],table[17..-1])
         end
         @huffman_tables = tables
+    end
+
+    # Takes the frequency tables and the values from the DHT and returns a hash
+    # with keys matching the path and storing the associated value
+    # E.G. table["100"] => 3 (right,left,left)
+    def build_huffman_hash(frequencies, values)
+        table = Hash.new
+        to_skip = 0
+        frequencies.each_with_index do |f,row|
+            row += 1
+            row_values = values.shift(f)
+
+            (to_skip..(to_skip + f)).each_with_index do |k, i|
+                table["%0#{row}b" % k] = row_values[i]
+            end
+            to_skip += f
+            to_skip *= 2
+        end
+        table.delete_if { |path,value| value.nil? }
+        table
     end
 
 
