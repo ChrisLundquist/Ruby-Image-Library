@@ -216,19 +216,29 @@ class JPEG
     # E.G. table["100"] => 3 (right,left,left)
     def build_huffman_hash(frequencies, values)
         table = Hash.new
-        to_skip = 0
-        frequencies.each_with_index do |f,row|
-            row += 1
-            row_values = values.shift(f)
 
-            (to_skip..(to_skip + f)).each_with_index do |k, i|
-                table["%0#{row}b" % k] = row_values[i]
+        # The number of leading entries in each row to skip because they are "blocked" but leaf nodes in previous rows
+        blocked_entry_count = 0
+
+        frequencies.each_with_index do |frequency, bit_length|
+            # each_with_index starts at 0, but our frequency table starts at 1
+            bit_length += 1
+            # each leaf node blocks twice the number of entries in next row
+            blocked_entry_count *= 2
+
+            # shift off the value of this bit_length
+            row_values = values.shift(frequency)
+
+            row_values.each_with_index do |v, i|
+                # Insert an entry in our hash using the binary tree path as our key
+                table["%0#{bit_length}b" % (i + blocked_entry_count)] = v
             end
-            to_skip += f
-            to_skip *= 2
+
+            # keep track of how many leaf nodes we created so we don't use these positions in subsiquent rows
+            blocked_entry_count += frequency
         end
-        table.delete_if { |path,value| value.nil? }
-        table
+
+        return table
     end
 
 
