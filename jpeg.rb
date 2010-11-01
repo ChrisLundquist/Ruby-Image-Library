@@ -11,6 +11,7 @@ class JPEG
     APPLICATION_SPECIFIC = 0xE0..0xEF  # Anything the application wants to save in this
     COMMENT = 0xFE                     # Contains a text comment
     END_OF_IMAGE = 0xD9                #
+    ZRL = 0xF0 # indicates a run of 16 zeros
 
     attr_reader \
         :start_of_frame,        # Data in the start_of_frame marker
@@ -33,6 +34,7 @@ class JPEG
         @huffman_tables = Array.new
         @quantization_tables = Array.new
         @application_specific = Array.new
+        @last_dc_value = 0
         case file
         when File
             @file = file
@@ -249,10 +251,12 @@ class JPEG
     end
 
     def parse_ycbcr_scan
-        while @image.length > 8
-        [:y,:cb,:cr].each do |component|
-            get_mcu_component(component)
-        end
+        macro_blocks = Array.new
+        #FIXME we don't know when we want to stop
+        while @image.length > 7 
+            [:y,:cb,:cr].each do |component|
+                macro_blocks << get_mcu_component(component)
+            end
         end
     end
 
@@ -263,9 +267,8 @@ class JPEG
         end
     end
 
-    #FIXME we get off track and read crazy values
     def get_mcu_component(component)
-        dc_table = huffman_table_for_component(component,:dc)
+        dc_table = huffman_table_for_component(component,:dc) 
         ac_table = huffman_table_for_component(component,:ac)
 
         # We will have up to 64 entries representing coeffecients of a DCT
@@ -273,25 +276,37 @@ class JPEG
 
         # The first value encoded is the DC for the component
         mcu[0] = get_next_scan_value(dc_table)
-
-        # All the other values use the AC table for the component
-        mcu[1..63].each_index do |i|
-            mcu[i + 1] = get_next_scan_value(ac_table)
+        # its all zeros
+        if(mcu[0] != 0)
+            index = 1
+            while value = get_next_scan_value(ac_table)
+                case value
+                when 0 # END_OF_BLOCK
+                    break 
+                when ZRL # 16 zeros
+                    index += 16
+                else
+                    # We should never have more than 64 components in an mcu
+                    raise "abnormally long scan" if index > 64 
+                    mcu[index] = value
+                end
+            end
         end
-        puts mcu.inspect
+        # Each DC value is stored as a delta from the previous
+        mcu[0] += @last_dc_value
+        @last_dc_value = mcu[0]
         return mcu
     end
 
+    # Reads bits that match our huffman tree's path then reads that many more bits and interprets and returns the value
     def get_next_scan_value(huffman_table)
         end_of_value = 0 
-
-        while huffman_table.keys.select { |k| k.start_with?(@image[0..end_of_value]) }.length > 0
+        # while the huffman table has a key that starts with our bit strings keep matching
+        while huffman_table.keys.select { |k| k.start_with?(@image[0..end_of_value]) }.length > 0 && end_of_value < @image.length
             end_of_value += 1
         end
         huffman_code = @image.slice!(0,end_of_value)
         length_of_value = huffman_table[huffman_code].to_i
-        #FIXME ZRL value meaning the component is done
-        #break if length_of_value == 0
 
         # Interpret the next string of bits as a signed int
         value = @image.slice!(0,length_of_value).to_i(2)
@@ -300,27 +315,46 @@ class JPEG
     # Returns the huffman table to use for +component+, and +type+
     def huffman_table_for_component(component,type)
         type_id = "#{type}_id".to_sym
-        @huffman_tables[type][@start_of_scan[component][type_id]]
+        @huffman_tables[type][@start_of_scan[component][type_id]] or \
+            raise("#{type} #{component} huffman table is nil:\n" << @huffman_tables.inspect << "\nstart_of_scan:\n" << @start_of_scan.inspect)
     end
 
+    # IMPORTANT NOTE sometimes one DHT marker will have multiple huffman tables inside it
     def parse_huffman_tables
-        tables = Hash.new
-        tables[:ac] = Hash.new
-        tables[:dc] = Hash.new
-        #
         #  HT information (1 byte):
         #  bit 0..3: number of HT (0..3, otherwise error)
         #  bit 4   : type of HT, 0 = DC table, 1 = AC table
         #  bit 5..7: not used, must be 0
+        tables = Hash.new
+        tables[:ac] = Hash.new
+        tables[:dc] = Hash.new
 
         # Find the type and ID of each huffman table
         @huffman_tables.each do |table|
-            table_id = table.first & 0x07 # this SHOULD be 0..3 but sometimes adobe does what they want
-            ac_table = (table.first & 0x10) > 0
-            table_type = ac_table ? :ac : :dc
-            tables[table_type][table_id] = build_huffman_hash(table[1..16],table[17..-1])
+            # If they packed multiple huffman tables in one marker
+            while table.length > 0
+                info_byte = table.shift           # The first byte tells us about the huffman table to follow
+                table_id = info_byte & 0x07       # this SHOULD be 0..3 but sometimes adobe does what they want
+                ac_table = (info_byte & 0x10) > 0 # this bit says if its an AC table
+                table_type = ac_table ? :ac : :dc   # its either AC or DC
+
+                # The first 16 bytes represent the frequency table
+                frequencies = table.shift(16)
+
+                # We need to know how many entries the frequency table needs to be satisfied
+                table_entries = 0
+                frequencies.each do |i|
+                    table_entries += i
+                end
+
+                raise "Malformed huffman table. Missing data presumed\n entries: #{table_entries} \ntable: #{table.inspect}\n frequencies: #{frequencies.inspect}" if table_entries > table.length
+
+                data = table.shift(table_entries)
+                tables[table_type][table_id] = build_huffman_hash(frequencies,data)
+            end
         end
         @huffman_tables = tables
+        return @hufman_tables
     end
 
     # Takes the frequency tables and the values from the DHT and returns a hash
