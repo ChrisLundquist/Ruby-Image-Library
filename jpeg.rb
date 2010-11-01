@@ -11,7 +11,7 @@ class JPEG
     APPLICATION_SPECIFIC = 0xE0..0xEF  # Anything the application wants to save in this
     COMMENT = 0xFE                     # Contains a text comment
     END_OF_IMAGE = 0xD9                #
-    ZRL = 0xF0 # indicates a run of 16 zeros
+    ZRL = 0xF0                         # indicates a run of 16 zeros
 
     attr_reader \
         :start_of_frame,        # Data in the start_of_frame marker
@@ -258,6 +258,7 @@ class JPEG
                 macro_blocks << get_mcu_component(component)
             end
         end
+        puts macro_blocks.inspect
     end
 
     def parse_rgb_scan #TODO
@@ -347,7 +348,10 @@ class JPEG
                     table_entries += i
                 end
 
-                raise "Malformed huffman table. Missing data presumed\n entries: #{table_entries} \ntable: #{table.inspect}\n frequencies: #{frequencies.inspect}" if table_entries > table.length
+                raise "Malformed huffman table. Missing data presumed
+                entries: #{table_entries} 
+                table: #{table.inspect}
+                frequencies: #{frequencies.inspect}" if table_entries > table.length
 
                 data = table.shift(table_entries)
                 tables[table_type][table_id] = build_huffman_hash(frequencies,data)
@@ -398,7 +402,8 @@ class JPEG
             precision = table.first & 0xF0 > 0 ? 16 : 8 
 
             if precision == 16
-                #TODO reinterpret the 64 bytes into 32 shorts
+                # Reinterpret the 64 chars into 32 shorts
+                table = table.pack("C*").unpack("n*")
             end
             tables[table_number] = { :data => table[1..-1], :precision => precision }
         end
