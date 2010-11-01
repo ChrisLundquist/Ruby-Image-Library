@@ -69,8 +69,10 @@ class JPEG
         parse_quantization_tables()
         # The huffman tables
         parse_huffman_tables()
+        # The info on which huffman table to use for each component
         parse_start_of_scan()
-
+        # decodes the entropy encoded data into MCUs
+        parse_scan()
     end
 
     def new_from_path
@@ -208,19 +210,20 @@ class JPEG
         #  - 3 bytes to be ignored (???)
 
         # The start of scan segment tells us how to interpret the data. Such as which tables to use for each component
-        @data = @start_of_scan
+        @image = @start_of_scan
 
         # The first two bytes of the segment is the length of this scan
-        length_high, length_low = @data.shift(2)
+        length_high, length_low = @image.shift(2)
         length = (length_high << 8) + length_low
 
-        @start_of_scan = @data.shift(length)
+        @start_of_scan = @image.shift(length)
 
         number_of_components_to_scan = @start_of_scan.shift()
         raise "Invalid number of components to scan: #{number_of_components_to_scan}" unless (1..4).include?(number_of_components_to_scan)
 
         scan_table = Hash.new
 
+        # Parse which ac/dc huffman tables to use for each component
         number_of_components_to_scan.times do |component|
             component_id, huffman_table = @start_of_scan.shift(2)
             ac_huffman_table_id = huffman_table & 0x0F
@@ -229,6 +232,75 @@ class JPEG
         end
         # The scan table tells us which huffman table to use for each component
         @start_of_scan = scan_table
+    end
+
+    def parse_scan
+        @image = @image.map { |i| "%08b" % i }.join if @image.is_a?(Array)
+        case @color_space
+        when :ycbcr
+            parse_ycbcr_scan()
+        when :rgb
+            parse_rgb_scan()
+        when :grey
+            parse_grey_scan()
+        else
+            raise "color space parsing of '#{@color_space}' not implimented"
+        end
+    end
+
+    def parse_ycbcr_scan
+        while @image.length > 8
+        [:y,:cb,:cr].each do |component|
+            get_mcu_component(component)
+        end
+        end
+    end
+
+    def parse_rgb_scan #TODO
+        raise "not implimented"
+        [:r,:g,:b].each do |component|
+            get_mcu_component(component)
+        end
+    end
+
+    #FIXME we get off track and read crazy values
+    def get_mcu_component(component)
+        dc_table = huffman_table_for_component(component,:dc)
+        ac_table = huffman_table_for_component(component,:ac)
+
+        # We will have up to 64 entries representing coeffecients of a DCT
+        mcu = Array.new(64,0)
+
+        # The first value encoded is the DC for the component
+        mcu[0] = get_next_scan_value(dc_table)
+
+        # All the other values use the AC table for the component
+        mcu[1..63].each_index do |i|
+            mcu[i + 1] = get_next_scan_value(ac_table)
+        end
+        puts mcu.inspect
+        return mcu
+    end
+
+    def get_next_scan_value(huffman_table)
+        end_of_value = 0 
+
+        while huffman_table.keys.select { |k| k.start_with?(@image[0..end_of_value]) }.length > 0
+            end_of_value += 1
+        end
+        huffman_code = @image.slice!(0,end_of_value)
+        length_of_value = huffman_table[huffman_code].to_i
+        #FIXME ZRL value meaning the component is done
+        #break if length_of_value == 0
+
+        # Interpret the next string of bits as a signed int
+        value = @image.slice!(0,length_of_value).to_i(2)
+    end
+
+    # Returns the huffman table to use for +component+, and +type+
+    def huffman_table_for_component(component,type)
+        type_id = "#{type}_id".to_sym
+        @huffman_tables[type][@start_of_scan[component][type_id]]
     end
 
     def parse_huffman_tables
@@ -280,7 +352,6 @@ class JPEG
 
         return table
     end
-
 
     def parse_quantization_tables
         #NOTE
