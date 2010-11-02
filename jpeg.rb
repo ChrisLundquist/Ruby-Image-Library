@@ -257,6 +257,7 @@ class JPEG
         [:y,:cb,:cr].each do |component|
             macro_blocks << get_mcu_component(component)
         end
+        puts macro_blocks.inspect
     end
 
     def parse_rgb_scan #TODO
@@ -271,7 +272,8 @@ class JPEG
         ac_table = huffman_table_for_component(component,:ac)
 
         # We will have up to 64 entries representing coeffecients of a DCT
-        mcu = Array.new(64,0)
+        # Here we will use a hash to simulate a sparse array
+        mcu = Hash.new(0)
 
         # The first value encoded is the DC for the component
         mcu[0] = get_next_scan_value(dc_table)
@@ -300,29 +302,27 @@ class JPEG
 
     # Reads bits that match our huffman tree's path then reads that many more bits and interprets and returns the value
     def get_next_scan_value(huffman_table)
-        # DC Huffman codes can never be more than 16, But AC codes can be longer
         # Use the longest code of this table
-        end_of_value = huffman_table.keys.sort_by { |i| i.length }.last.length
+        huffman_table[:max_key_length].times do |i|
+            if length_of_value = huffman_table[@image[0..i]]
+                # Shift of this valid huffman code from our image
+                huffman_code = @image.slice!(0, i + 1)
 
-        # We try a greedy match and shrink it until it works or doesn't match at all
-        until huffman_table[@image[0..end_of_value]] or end_of_value == 0
-            end_of_value -= 1
+                value = @image.slice!(0, length_of_value)
+                value = binary_string_to_i(value)
+                return value
+            end
         end
-        raise "No value found a subset of: #{@image[0..16].inspect}\nHuffman Table:\n #{huffman_table.inspect}" if end_of_value <= 0 and @image.length > 0
-        end_of_value += 1 # loop is off by one
+        raise "No value found a subset of: #{@image[0..16].inspect}\nHuffman Table:\n #{huffman_table.inspect}"
+    end
 
-        huffman_code = @image.slice!(0,end_of_value)
-        length_of_value = huffman_table[huffman_code]
-        raise "no data left in image!" unless length_of_value
-
-        value = @image.slice!(0,length_of_value)
-        # Interpret the next string of bits as a signed int
+    # Interprets a signed binary string as a decimal value
+    def binary_string_to_i(value)
         if value[0] == 48          # If its a leading zero to_i will throw it away
             value = ~value.to_i(2) # Really its a negative number
         else
             value = value.to_i(2)  # Just a positive number
         end
-        value
     end
 
     # Returns the huffman table to use for +component+, and +type+
@@ -369,6 +369,7 @@ class JPEG
 
                 data = table.shift(table_entries)
                 tables[table_type][table_id] = build_huffman_hash(frequencies,data)
+                tables[table_type][table_id][:max_key_length] = tables[table_type][table_id].keys.max{|a, b| a.length <=> b.length}.length
             end
         end
         @huffman_tables = tables
