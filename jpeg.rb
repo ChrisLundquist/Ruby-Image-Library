@@ -218,7 +218,8 @@ class JPEG
         length_high, length_low = @image.shift(2)
         length = (length_high << 8) + length_low
 
-        @start_of_scan = @image.shift(length)
+        # IMPORTANT length - 2 because the length 2 byte header counts itself
+        @start_of_scan = @image.shift(length - 2)
 
         number_of_components_to_scan = @start_of_scan.shift()
         raise "Invalid number of components to scan: #{number_of_components_to_scan}" unless (1..4).include?(number_of_components_to_scan)
@@ -251,14 +252,11 @@ class JPEG
     end
 
     def parse_ycbcr_scan
-        macro_blocks = Array.new
         #FIXME we don't know when we want to stop
-        while @image.length > 7 
-            [:y,:cb,:cr].each do |component|
-                macro_blocks << get_mcu_component(component)
-            end
+        macro_blocks = Array.new
+        [:y,:cb,:cr].each do |component|
+            macro_blocks << get_mcu_component(component)
         end
-        puts macro_blocks.inspect
     end
 
     def parse_rgb_scan #TODO
@@ -283,8 +281,9 @@ class JPEG
             while value = get_next_scan_value(ac_table)
                 case value
                 when 0 # END_OF_BLOCK
-                    break 
+                    break
                 when ZRL # 16 zeros
+                    puts "ZRL"
                     index += 16
                 else
                     # We should never have more than 64 components in an mcu
@@ -296,28 +295,43 @@ class JPEG
         # Each DC value is stored as a delta from the previous
         mcu[0] += @last_dc_value
         @last_dc_value = mcu[0]
-        return mcu
+        mcu
     end
 
     # Reads bits that match our huffman tree's path then reads that many more bits and interprets and returns the value
     def get_next_scan_value(huffman_table)
-        end_of_value = 0 
-        # while the huffman table has a key that starts with our bit strings keep matching
-        while huffman_table.keys.select { |k| k.start_with?(@image[0..end_of_value]) }.length > 0 && end_of_value < @image.length
-            end_of_value += 1
+        # Huffman codes can never be more than 16
+        end_of_value = 16
+
+        # We try a greedy match and shrink it until it works or doesn't match at all
+        until huffman_table[@image[0..end_of_value]] or end_of_value == 0
+            end_of_value -= 1
         end
+        raise "No value found a subset of: #{@image[0..16].inspect}\nHuffman Table:\n #{huffman_table.inspect}" if end_of_value <= 0 and @image.length > 0
+        end_of_value += 1 # loop is off by one
+
         huffman_code = @image.slice!(0,end_of_value)
-        length_of_value = huffman_table[huffman_code].to_i
+        length_of_value = huffman_table[huffman_code]
+        raise "no data left in image!" unless length_of_value
 
         # Interpret the next string of bits as a signed int
-        value = @image.slice!(0,length_of_value).to_i(2)
+        value = @image.slice!(0,length_of_value)
+
+        if value[0] == 48        # If its a leading zero to_i will throw it away
+            value = ~value.to_i(2) # Really its a negative number
+        else
+            value = value.to_i(2)  # Just a positive number
+        end
+        value
     end
 
     # Returns the huffman table to use for +component+, and +type+
     def huffman_table_for_component(component,type)
         type_id = "#{type}_id".to_sym
         @huffman_tables[type][@start_of_scan[component][type_id]] or \
-            raise("#{type} #{component} huffman table is nil:\n" << @huffman_tables.inspect << "\nstart_of_scan:\n" << @start_of_scan.inspect)
+            raise("#{type} #{component} huffman table is nil: 
+                  #{@huffman_tables.inspect} 
+                  start_of_scan: #{@start_of_scan.inspect}")
     end
 
     # IMPORTANT NOTE sometimes one DHT marker will have multiple huffman tables inside it
