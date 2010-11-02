@@ -300,8 +300,9 @@ class JPEG
 
     # Reads bits that match our huffman tree's path then reads that many more bits and interprets and returns the value
     def get_next_scan_value(huffman_table)
-        # Huffman codes can never be more than 16
-        end_of_value = 16
+        # DC Huffman codes can never be more than 16, But AC codes can be longer
+        # Use the longest code of this table
+        end_of_value = huffman_table.keys.sort_by { |i| i.length }.last.length
 
         # We try a greedy match and shrink it until it works or doesn't match at all
         until huffman_table[@image[0..end_of_value]] or end_of_value == 0
@@ -314,10 +315,9 @@ class JPEG
         length_of_value = huffman_table[huffman_code]
         raise "no data left in image!" unless length_of_value
 
-        # Interpret the next string of bits as a signed int
         value = @image.slice!(0,length_of_value)
-
-        if value[0] == 48        # If its a leading zero to_i will throw it away
+        # Interpret the next string of bits as a signed int
+        if value[0] == 48          # If its a leading zero to_i will throw it away
             value = ~value.to_i(2) # Really its a negative number
         else
             value = value.to_i(2)  # Just a positive number
