@@ -21,6 +21,8 @@ class JPEG
     # Maps a color space id to the color space symbol
     COLOR_SPACE_ID_TO_SYMBOL = { 1 => :grey, 3 => :ycbcr, 4 => :cmyk}
 
+    COEFFECIENTS = { :red => 0.299, :green => 0.587, :blue => 0.114 }
+
     attr_reader \
         :start_of_frame,        # Data in the start_of_frame marker
         :huffman_tables,        # Data from the define huffman tables marker
@@ -61,14 +63,40 @@ class JPEG
         "#{file_path} #{@height}x#{@width} #{@color_space}"
     end
 
-    # converts the instance to a Bitmap object
-    def to_bmp
+    def to_ycbcr # FIXME
+        # No work to be done
+        return unless @color_space == :rgb
+        ycbcr_image = Array.new
+
+        @image.each_slice(3) do |r,g,b|
+            y = COEFFECIENTS[:red] * r + COEFFECIENTS[:green] * g + COEFFECIENTS[:blue] * b
+            cb = (b - y) / ( 2 - 2 * COEFFECIENTS[:blue] )
+            cr = (r - y) / ( 2 - 2 * COEFFECIENTS[:red] )
+            ycbcr_image += [y.to_i, cb.to_i, cr.to_i]
+        end
+        @image = ycbcr_image
     end
 
-    # writes the object to disk
-    def save(file_path = @file_path) # default to the file we opened
+    def to_rgb
+        # No work to be done
+        return unless @color_space == :ycbcr
+        rgb_image = Array.new
+        @image.each_slice(3) do |y, cb, cr|
+            red = cr * ( 2 - 2 *COEFFECIENTS[:red] ) + y
+            blue = cr * ( 2 - 2 *COEFFECIENTS[:blue] ) + y
+            green = (y - COEFFECIENTS[:blue] * blue - COEFFECIENTS[:red] * red) / COEFFECIENTS[:green]
+
+            # We have to shift it by 128 to go from [-127..128] to [0..255]
+            rgb_image += [red.to_i + 128, green.to_i + 128, blue.to_i + 128]
+        end
+        # Update our color space so we don't double convert
+        @color_space = :rgb
+        @image = rgb_image
     end
-    alias :write_file :save
+
+    # Converts the instance to a Bitmap object
+    def to_bmp
+    end
 
     private 
     def new_from_file
@@ -85,6 +113,8 @@ class JPEG
         parse_scan()
         # Turns the decoded DCTs into ycrcb color space
         dct_to_ycrcb()
+        # We have 2D arrays of macro blocks that we need to turn into a 1d array of pixels
+        macro_blocks_to_pixels()
     end
 
     def new_from_path
@@ -244,7 +274,6 @@ class JPEG
         #         we know we can stop
         while @scan.include?("0")
             [:y,:cb,:cr].each do |component|
-                #puts component
                 macro_blocks << get_mcu_component(component)
             end
         end
@@ -264,12 +293,10 @@ class JPEG
         mcu[0] = get_next_scan_value(dc_table)
         index = 1
         while value = get_next_scan_value(ac_table)
-            #puts "value: " + value.to_s
             case value
             when END_OF_BLOCK
                 break
             when ZRL # 16 zeros
-                #puts "ZRL"
                 index += 16
             else
                 # We should never have more than 64 components in an mcu
@@ -290,7 +317,6 @@ class JPEG
             if length_of_value = huffman_table[@scan[0..i]]
                 # Shift of this valid huffman code from our image
                 huffman_code = @scan.slice!(0, i + 1)
-                #puts huffman_code.inspect
 
                 value = @scan.slice!(0, length_of_value)
                 value = binary_string_to_i(value)
@@ -417,11 +443,70 @@ class JPEG
         @quantization_tables = tables
     end
 
+    def quantization_table_for_component(component)
+        @quantization_tables[@samples[component][:quantization_table_id]][:data]
+    end
+
+    def member_by_member_multiply(lhs,rhs)
+        result = Array.new(64)
+        64.times do |i|
+            result[i] = lhs[i] * rhs[i]
+        end
+        result
+    end
+
+    #TODO Blocks are encoded in a zig zag order, for 8x8 this order is 1,2,9,3,10,17....
+    #     We need them in real order
+    def zigzag_reorder(mcu_block)
+        mcu_block
+    end
+
+    def reverse_dct(mcu_block)
+        #TODO Research why no one explains the "DCT gain of 4"
+        mcu_block.map! { |i| i / 4 }
+        # Initialize our array to half our DC value instead of adding it everywhere later
+        terms = mcu_block.length
+        output = Array.new(terms, mcu_block[0] * 0.5)
+        output.each_index do |index|
+            1.upto(terms - 1) do |j|
+                output[index] += mcu_block[j] * Math::cos( (Math::PI / terms) * j * ( index + 0.5))
+            end
+            output[index] = output[index].to_i
+        end
+        output
+    end
+
+    # Converts the macroblocks into pixels
+    def macro_blocks_to_pixels
+        @image = Array.new
+        @macro_blocks.each_slice(3) do |y,b,r|
+            # Get all the elements by making a deep copy
+            y.length.times do |i|
+                pixel_group = [y[i],b[i],r[i]]
+                @image += pixel_group
+            end
+        end
+        @image
+    end
+
     def dct_to_ycrcb
-        @dct.each_slice(3) do |y,r,b|
-            puts y.inspect
-            puts r.inspect
-            puts b.inspect
+        @macro_blocks = Array.new
+        # Get the quantization tables
+        y_quant_table = quantization_table_for_component(:y)
+        b_quant_table = quantization_table_for_component(:cb)
+        r_quant_table = quantization_table_for_component(:cr)
+
+        @dct.each_slice(3) do |y,b,r|
+            y = zigzag_reorder(y)
+            b = zigzag_reorder(b)
+            r = zigzag_reorder(r)
+            y = member_by_member_multiply(y_quant_table,y)
+            b = member_by_member_multiply(b_quant_table,b)
+            r = member_by_member_multiply(r_quant_table,r)
+            y = reverse_dct(y)
+            b = reverse_dct(b)
+            r = reverse_dct(r)
+            @macro_blocks << y << b << r
         end
     end
 end
