@@ -1,5 +1,6 @@
 class JPEG
-    FILE_MAGIC_NUMBER = [0xFF,0xD8]    # to validate we are opening a JPEG file
+    require 'matrix'
+    FILE_MAGIC_NUMBER = [0xFF,0xD8]    # To validate we are opening a JPEG file
     START_OF_IMAGE = 0xD8              # File magic Number
     START_OF_FRAME = 0xC0              # baseline DCT
     PROGRESSIVE_START_OF_FRAME = 0xC2  # Progressive DCT
@@ -11,7 +12,14 @@ class JPEG
     APPLICATION_SPECIFIC = 0xE0..0xEF  # Anything the application wants to save in this
     COMMENT = 0xFE                     # Contains a text comment
     END_OF_IMAGE = 0xD9                #
-    ZRL = 0xF0                         # indicates a run of 16 zeros
+
+    ZRL = 0xF0                         # Indicates a run of 16 zeros
+    END_OF_BLOCK = 0x00                # Indicates the end of a mcu component
+
+    # Maps a component id to the component symbol
+    COMPONENT_ID_TO_SYMBOL = {1=> :y, 2=> :cb, 3=> :cr, 4 =>:i, 5 =>:q }
+    # Maps a color space id to the color space symbol
+    COLOR_SPACE_ID_TO_SYMBOL = { 1 => :grey, 3 => :ycbcr, 4 => :cmyk}
 
     attr_reader \
         :start_of_frame,        # Data in the start_of_frame marker
@@ -34,7 +42,8 @@ class JPEG
         @huffman_tables = Array.new
         @quantization_tables = Array.new
         @application_specific = Array.new
-        @last_dc_value = 0
+        @comment = Array.new
+        @last_dc_value = Hash.new(0)
         case file
         when File
             @file = file
@@ -64,7 +73,6 @@ class JPEG
     private 
     def new_from_file
         parse_markers()
-
         # Tells us our color space and dimensions
         parse_start_of_frame()
         # The quantization tables to use
@@ -75,6 +83,8 @@ class JPEG
         parse_start_of_scan()
         # decodes the entropy encoded data into MCUs
         parse_scan()
+        # Turns the decoded DCTs into ycrcb color space
+        dct_to_ycrcb()
     end
 
     def new_from_path
@@ -93,17 +103,21 @@ class JPEG
             when START_OF_FRAME             # 192
                 @start_of_frame = read_data_segment()
             when PROGRESSIVE_START_OF_FRAME
+                raise "unimplemented marker"
             when DEFINE_HUFFMAN_TABLES      # 196
                 @huffman_tables << read_data_segment()
             when DEFINE_QUANTIZATION_TABLES # 219
                 @quantization_tables << read_data_segment()
             when DEFINE_RESTART_INTERVAL
+                raise "unimplemented marker"
             when START_OF_SCAN
                 @start_of_scan = read_entropy_encoded_segment()
             when RESTART
+                raise "unimplemented marker"
             when APPLICATION_SPECIFIC  # 224..240
                 @application_specific << read_data_segment()
             when COMMENT
+                @comment << read_data_segment()
             when END_OF_IMAGE
                 # All Done
             else
@@ -163,16 +177,7 @@ class JPEG
         @height = (@start_of_frame[1] << 8) + @start_of_frame[2]
         @width = (@start_of_frame[3] << 8) + @start_of_frame[4]
 
-        @color_space = case @start_of_frame[5]
-                       when 1
-                           :grey
-                       when 3
-                           :ycbcr
-                       when 4
-                           :cmyk
-                       else
-                           :unkown
-                       end
+        @color_space = COLOR_SPACE_ID_TO_SYMBOL[@start_of_frame[5]]
         @samples = Hash.new
 
         # Helper function that unpacks the sample ratio
@@ -180,24 +185,7 @@ class JPEG
         get_sample_ratio = lambda { |sample_byte| return Rational(sample_byte & 0x0F, sample_byte & 0xF0 >> 4) } 
 
         @start_of_frame[6..-1].each_slice(3) do |component_id, sample_factors, quantization_table_id|
-            @samples[component_id_to_symbol(component_id)]  = { :ratio => get_sample_ratio.call(sample_factors), :quantization_table_id => quantization_table_id }
-        end
-    end
-
-    def component_id_to_symbol(id)
-        case id
-        when 1
-            :y
-        when 2
-            :cb
-        when 3
-            :cr
-        when 4
-            :i
-        when 5
-            :q
-        else
-            raise "Unrecognized component in start of frame segment"
+            @samples[COMPONENT_ID_TO_SYMBOL[component_id]]  = { :ratio => get_sample_ratio.call(sample_factors), :quantization_table_id => quantization_table_id }
         end
     end
 
@@ -212,14 +200,14 @@ class JPEG
         #  - 3 bytes to be ignored (???)
 
         # The start of scan segment tells us how to interpret the data. Such as which tables to use for each component
-        @image = @start_of_scan
+        @scan = @start_of_scan
 
         # The first two bytes of the segment is the length of this scan
-        length_high, length_low = @image.shift(2)
+        length_high, length_low = @scan.shift(2)
         length = (length_high << 8) + length_low
 
         # IMPORTANT length - 2 because the length 2 byte header counts itself
-        @start_of_scan = @image.shift(length - 2)
+        @start_of_scan = @scan.shift(length - 2)
 
         number_of_components_to_scan = @start_of_scan.shift()
         raise "Invalid number of components to scan: #{number_of_components_to_scan}" unless (1..4).include?(number_of_components_to_scan)
@@ -231,42 +219,39 @@ class JPEG
             component_id, huffman_table = @start_of_scan.shift(2)
             ac_huffman_table_id = huffman_table & 0x0F
             dc_huffman_table_id = (huffman_table & 0xF0) >> 4
-            scan_table[component_id_to_symbol(component_id)] = { :ac_id => ac_huffman_table_id, :dc_id => dc_huffman_table_id} 
+            scan_table[COMPONENT_ID_TO_SYMBOL[component_id]] = { :ac_id => ac_huffman_table_id, :dc_id => dc_huffman_table_id} 
         end
         # The scan table tells us which huffman table to use for each component
         @start_of_scan = scan_table
     end
 
     def parse_scan
-        @image = @image.map { |i| "%08b" % i }.join if @image.is_a?(Array)
+        #TODO OPTIMIZE mapping it to a string is expensive
+        @scan = @scan.map { |i| "%08b" % i }.join if @scan.is_a?(Array)
         case @color_space
         when :ycbcr
             parse_ycbcr_scan()
         when :rgb
-            parse_rgb_scan()
-        when :grey
-            parse_grey_scan()
+            raise "not implemented"
         else
             raise "color space parsing of '#{@color_space}' not implimented"
         end
     end
 
     def parse_ycbcr_scan
-        #FIXME we don't know when we want to stop
         macro_blocks = Array.new
-        [:y,:cb,:cr].each do |component|
-            macro_blocks << get_mcu_component(component)
+        #OPTIMIZE The end of the file is padded with all 1s so if there are no zeros
+        #         we know we can stop
+        while @scan.include?("0")
+            [:y,:cb,:cr].each do |component|
+                #puts component
+                macro_blocks << get_mcu_component(component)
+            end
         end
-        puts macro_blocks.inspect
+        @dct = macro_blocks
     end
 
-    def parse_rgb_scan #TODO
-        raise "not implimented"
-        [:r,:g,:b].each do |component|
-            get_mcu_component(component)
-        end
-    end
-
+    # Returns the 8x8 DCT coeffecient matrix (as a sparse hash) for the given component
     def get_mcu_component(component)
         dc_table = huffman_table_for_component(component,:dc) 
         ac_table = huffman_table_for_component(component,:ac)
@@ -277,26 +262,24 @@ class JPEG
 
         # The first value encoded is the DC for the component
         mcu[0] = get_next_scan_value(dc_table)
-        # its all zeros
-        if(mcu[0] != 0)
-            index = 1
-            while value = get_next_scan_value(ac_table)
-                case value
-                when 0 # END_OF_BLOCK
-                    break
-                when ZRL # 16 zeros
-                    puts "ZRL"
-                    index += 16
-                else
-                    # We should never have more than 64 components in an mcu
-                    raise "abnormally long scan" if index > 64 
-                    mcu[index] = value
-                end
+        index = 1
+        while value = get_next_scan_value(ac_table)
+            #puts "value: " + value.to_s
+            case value
+            when END_OF_BLOCK
+                break
+            when ZRL # 16 zeros
+                #puts "ZRL"
+                index += 16
+            else
+                # We should never have more than 64 components in an mcu
+                raise "abnormally long mcu" if index > 64 
+                mcu[index] = value
             end
         end
         # Each DC value is stored as a delta from the previous
-        mcu[0] += @last_dc_value
-        @last_dc_value = mcu[0]
+        mcu[0] += @last_dc_value[component]
+        @last_dc_value[component] = mcu[0]
         mcu
     end
 
@@ -304,16 +287,17 @@ class JPEG
     def get_next_scan_value(huffman_table)
         # Use the longest code of this table
         huffman_table[:max_key_length].times do |i|
-            if length_of_value = huffman_table[@image[0..i]]
+            if length_of_value = huffman_table[@scan[0..i]]
                 # Shift of this valid huffman code from our image
-                huffman_code = @image.slice!(0, i + 1)
+                huffman_code = @scan.slice!(0, i + 1)
+                #puts huffman_code.inspect
 
-                value = @image.slice!(0, length_of_value)
+                value = @scan.slice!(0, length_of_value)
                 value = binary_string_to_i(value)
                 return value
             end
         end
-        raise "No value found a subset of: #{@image[0..16].inspect}\nHuffman Table:\n #{huffman_table.inspect}"
+        raise "No value found a subset of: #{@scan[0..16].inspect}\nHuffman Table:\n #{huffman_table.inspect}"
     end
 
     # Interprets a signed binary string as a decimal value
@@ -406,22 +390,38 @@ class JPEG
         return table
     end
 
+    # Extracts the quantization tables from the marker
     def parse_quantization_tables
         #NOTE
         #bit 0..3: number of QT (0..3, otherwise error)
         #bit 4..7: precision of QT, 0 = 8 bit, otherwise 16 bit
         tables = Hash.new
         @quantization_tables.each do |table|
-            table_number = table.first & 0x0F
-            raise "Quantization table id > 3" if table_number > 3
-            precision = table.first & 0xF0 > 0 ? 16 : 8 
+            # Adobe likes to pack all the quantization tables together
+            while(table.length > 0)
+                info_byte = table.shift
+                table_number = info_byte & 0x0F
+                raise "Quantization table id > 3" if table_number > 3
+                precision = info_byte& 0xF0 > 0 ? 16 : 8 
 
-            if precision == 16
-                # Reinterpret the 64 chars into 32 shorts
-                table = table.pack("C*").unpack("n*")
+                if precision == 16
+                    # Reinterpret the 64 chars into 32 shorts
+                    data = table.shift(2 * 64) 
+                    data = data.pack("C*").unpack("n*")
+                else
+                    data = table.shift(64)
+                end
+                tables[table_number] = { :data => data, :precision => precision }
             end
-            tables[table_number] = { :data => table[1..-1], :precision => precision }
         end
         @quantization_tables = tables
+    end
+
+    def dct_to_ycrcb
+        @dct.each_slice(3) do |y,r,b|
+            puts y.inspect
+            puts r.inspect
+            puts b.inspect
+        end
     end
 end
