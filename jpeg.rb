@@ -69,10 +69,13 @@ class JPEG
         ycbcr_image = Array.new
 
         @image.each_slice(3) do |r,g,b|
+            r -= 128
+            g -= 128
+            b -= 128
             y = COEFFECIENTS[:red] * r + COEFFECIENTS[:green] * g + COEFFECIENTS[:blue] * b
             cb = (b - y) / ( 2 - 2 * COEFFECIENTS[:blue] )
             cr = (r - y) / ( 2 - 2 * COEFFECIENTS[:red] )
-            ycbcr_image += [y.to_i, cb.to_i, cr.to_i]
+            ycbcr_image += [y.round.to_i, cb.round.to_i, cr.round.to_i]
         end
         @image = ycbcr_image
     end
