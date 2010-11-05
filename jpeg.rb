@@ -1,5 +1,4 @@
 class JPEG
-    require 'matrix'
     FILE_MAGIC_NUMBER = [0xFF,0xD8]    # To validate we are opening a JPEG file
     START_OF_IMAGE = 0xD8              # File magic Number
     START_OF_FRAME = 0xC0              # baseline DCT
@@ -17,7 +16,7 @@ class JPEG
     END_OF_BLOCK = 0x00                # Indicates the end of a mcu component
 
     # Maps a component id to the component symbol
-    COMPONENT_ID_TO_SYMBOL = {1=> :y, 2=> :cb, 3=> :cr, 4 =>:i, 5 =>:q }
+    COMPONENT_ID_TO_SYMBOL = { 1 => :y, 2 => :cb, 3 => :cr, 4 => :i, 5 => :q }
     # Maps a color space id to the color space symbol
     COLOR_SPACE_ID_TO_SYMBOL = { 1 => :grey, 3 => :ycbcr, 4 => :cmyk}
 
@@ -63,7 +62,7 @@ class JPEG
         "#{file_path} #{@height}x#{@width} #{@color_space}"
     end
 
-    def to_ycbcr # FIXME
+    def to_ycbcr
         # No work to be done
         return unless @color_space == :rgb
         ycbcr_image = Array.new
@@ -317,12 +316,21 @@ class JPEG
     def get_next_scan_value(huffman_table)
         # Use the longest code of this table
         huffman_table[:max_key_length].times do |i|
-            if length_of_value = huffman_table[@scan[0..i]]
+            i += 1 # We have to match 1..max not 0..max - 1
+            # Check if the huffman table includes the key of this substring of our scan
+            if length_of_value = huffman_table[@scan[0...i]]
                 # Shift of this valid huffman code from our image
-                huffman_code = @scan.slice!(0, i + 1)
+                huffman_code = @scan.slice!(0, i)
+
 
                 value = @scan.slice!(0, length_of_value)
                 value = binary_string_to_i(value)
+                if value > 80000
+                    puts length_of_value.inspect
+                    puts value
+                    raise 'crazy value' 
+                end
+
                 return value
             end
         end
@@ -415,7 +423,6 @@ class JPEG
             # Keep track of how many leaf nodes we created so we don't use these positions in subsiquent rows
             blocked_entry_count += frequency
         end
-
         return table
     end
 
