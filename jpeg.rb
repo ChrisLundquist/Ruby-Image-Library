@@ -20,7 +20,18 @@ class JPEG
     # Maps a color space id to the color space symbol
     COLOR_SPACE_ID_TO_SYMBOL = { 1 => :grey, 3 => :ycbcr, 4 => :cmyk}
 
+    # Coeffecients used for color space transformations
     COEFFECIENTS = { :red => 0.299, :green => 0.587, :blue => 0.114 }
+
+    # The scan order of DCT coeffecient is as depicted below
+    #ZIG_ZAG = [ 0,  1,  5,  6, 14, 15, 27, 28,
+    #            2,  4,  7, 13, 16, 26, 29, 42,
+    #            3,  8, 12, 17, 25, 30, 41, 43,
+    #            9, 11, 18, 24, 31, 40, 44, 53,
+    #            10, 19, 23, 32, 39, 45, 52, 54,
+    #            20, 22, 33, 38, 46, 51, 55, 60,
+    #            21, 34, 37, 47, 50, 56, 59, 61,
+    #            35, 36, 48, 49, 57, 58, 62, 63]
 
     attr_reader \
         :start_of_frame,        # Data in the start_of_frame marker
@@ -30,7 +41,7 @@ class JPEG
         :start_of_scan,         # Data in the start_of_scan marker
         :image,                 # Data describing our image
         :restart,
-        :appication_specific,
+        :appication_specific,   # APP0 may contain the JFIF header tag
         :comment,
         :file,          # The File (handle) to our object
         :file_path,     # The string file path of our image
@@ -100,7 +111,9 @@ class JPEG
     def to_bmp
     end
 
-    private 
+    private
+
+    # Presumes the given File is a jpeg
     def new_from_file
         parse_markers()
         # Tells us our color space and dimensions
@@ -121,11 +134,21 @@ class JPEG
         macro_blocks_to_pixels()
     end
 
+    # Opens the file given a path
     def new_from_path
         @file = File.open(@file_path)
         new_from_file()
     end
 
+    # Markers will start with a 0xFF then the next byte describes the marker type
+    # For NON entropy encoded data 
+    # - The 2 length bytes follow. The length bytes include themselves in the count.
+    # You cannot seek through entropy encoded data. Any bit patterns that represent
+    # markers are not valid.
+    #
+    # The entropy encoded data segment stuffs the 0xFF byte with a 0x00 byte immediately
+    # after to prevent framing errors. IN AN ENTROPY SEGMENT 0xFF 0x00 means 0xFF
+    
     # Reads the markers in the jpeg header
     def parse_markers
         while header = @file.read(2)
@@ -173,12 +196,11 @@ class JPEG
         return data
     end
 
-    # NOTE this mutates the entropy encoded segment by removing the bit stuffed 0s after 0xFF
+    # NOTE: This mutates the entropy encoded segment by removing the bit stuffed 0s after 0xFF
     # NOTE: In entropy encoded data to avoid framing errors, a 0xFF will be followed by 0x00
     #       if a 0xFF was intended and not the start of a marker
     def read_entropy_encoded_segment
         data = []
-
         while byte = @file.getbyte
             if byte == 0xff
                 byte = @file.getbyte
@@ -216,7 +238,7 @@ class JPEG
 
         # Helper function that unpacks the sample ratio
         # Sampling factors (bit 0-3 vert., 4-7 hor.)
-        get_sample_ratio = lambda { |sample_byte| return Rational(sample_byte & 0x0F, sample_byte & 0xF0 >> 4) } 
+        get_sample_ratio = lambda { |sample_byte| return Rational(sample_byte & 0x0F, sample_byte >> 4) } 
 
         @start_of_frame[6..-1].each_slice(3) do |component_id, sample_factors, quantization_table_id|
             @samples[COMPONENT_ID_TO_SYMBOL[component_id]]  = { :ratio => get_sample_ratio.call(sample_factors), :quantization_table_id => quantization_table_id }
@@ -252,12 +274,120 @@ class JPEG
         number_of_components_to_scan.times do |component|
             component_id, huffman_table = @start_of_scan.shift(2)
             ac_huffman_table_id = huffman_table & 0x0F
-            dc_huffman_table_id = (huffman_table & 0xF0) >> 4
+            dc_huffman_table_id = huffman_table >> 4
             scan_table[COMPONENT_ID_TO_SYMBOL[component_id]] = { :ac_id => ac_huffman_table_id, :dc_id => dc_huffman_table_id} 
         end
         # The scan table tells us which huffman table to use for each component
         @start_of_scan = scan_table
     end
+
+    # NOTE sometimes one DHT marker will have multiple huffman tables inside it
+    def parse_huffman_tables
+        #  HT information (1 byte):
+        #  bit 0..3: number of HT (0..3, otherwise error)
+        #  bit 4   : type of HT, 0 = DC table, 1 = AC table
+        #  bit 5..7: not used, must be 0
+        tables = Hash.new
+        tables[:ac] = Hash.new
+        tables[:dc] = Hash.new
+
+        # Find the type and ID of each huffman table
+        @huffman_tables.each do |table|
+            # If they packed multiple huffman tables in one marker
+            while table.length > 0
+                info_byte = table.shift           # The first byte tells us about the huffman table to follow
+                table_id = info_byte & 0x07       # this SHOULD be 0..3 but sometimes adobe does what they want
+                ac_table = (info_byte & 0x10) > 0 # this bit says if its an AC table
+                table_type = ac_table ? :ac : :dc   # its either AC or DC
+
+                # The first 16 bytes represent the frequency table
+                frequencies = table.shift(16)
+
+                # We need to know how many entries the frequency table needs to be satisfied
+                table_entries = 0
+                frequencies.each do |i|
+                    table_entries += i
+                end
+
+                raise "Malformed huffman table. Missing data presumed
+                entries: #{table_entries} 
+                table: #{table.inspect}
+                frequencies: #{frequencies.inspect}" if table_entries > table.length
+
+                data = table.shift(table_entries)
+                tables[table_type][table_id] = build_huffman_hash(frequencies,data)
+                tables[table_type][table_id][:max_key_length] = tables[table_type][table_id].keys.max{|a, b| a.length <=> b.length}.length
+            end
+        end
+        @huffman_tables = tables
+        return @hufman_tables
+    end
+
+    # Takes the frequency tables and the values from the DHT and returns a hash
+    # with keys matching the path and storing the associated value
+    # E.G. table["100"] => 3 (right,left,left)
+    def build_huffman_hash(frequencies, values)
+        table = Hash.new
+
+        # The number of leading entries in each row to skip because they are "blocked" but leaf nodes in previous rows
+        blocked_entry_count = 0
+
+        frequencies.each_with_index do |frequency, bit_length|
+            # Each_with_index starts at 0, but our frequency table starts at 1
+            bit_length += 1
+            # Each leaf node blocks twice the number of entries in next row
+            blocked_entry_count *= 2
+
+            # Shift off the value of this bit_length
+            row_values = values.shift(frequency)
+
+            row_values.each_with_index do |v, i|
+                # Insert an entry in our hash using the binary tree path as our key
+                table["%0#{bit_length}b" % (i + blocked_entry_count)] = v
+            end
+
+            # Keep track of how many leaf nodes we created so we don't use these positions in subsiquent rows
+            blocked_entry_count += frequency
+        end
+        return table
+    end
+
+    # Returns the huffman table to use for +component+, and +type+
+    def huffman_table_for_component(component,type)
+        type_id = "#{type}_id".to_sym
+        @huffman_tables[type][@start_of_scan[component][type_id]] or \
+            raise("#{type} #{component} huffman table is nil: 
+                  #{@huffman_tables.inspect} 
+                  start_of_scan: #{@start_of_scan.inspect}")
+    end
+
+    # Extracts the quantization tables from the marker
+    def parse_quantization_tables
+        #NOTE
+        #bit 0..3: number of QT (0..3, otherwise error)
+        #bit 4..7: precision of QT, 0 = 8 bit, otherwise 16 bit
+        tables = Hash.new
+        @quantization_tables.each do |table|
+            # Adobe likes to pack all the quantization tables together
+            while(table.length > 0)
+                info_byte = table.shift
+                table_number = info_byte & 0x0F
+                raise "Quantization table id > 3" if table_number > 3
+                precision = info_byte& 0xF0 > 0 ? 16 : 8 
+
+                if precision == 16
+                    # Reinterpret the 64 chars into 32 shorts
+                    data = table.shift(2 * 64) 
+                    data = data.pack("C*").unpack("n*")
+                else
+                    data = table.shift(64)
+                end
+                tables[table_number] = { :data => data, :precision => precision }
+            end
+        end
+        @quantization_tables = tables
+    end
+
 
     def parse_scan
         #TODO OPTIMIZE mapping it to a string is expensive
@@ -353,119 +483,13 @@ class JPEG
 
     # Interprets a signed binary string as a decimal value
     def binary_string_to_i(value)
-      # Depends on Ruby version
-        if value[0] == 48 or value[0] == "0"         # If its a leading zero to_i will throw it away
-            value = ~value.to_i(2) # Really its a negative number
+        # Depends on Ruby version
+        # 1.8.7                1.9.1
+        if value[0] == 48 or value[0] == "0"  # If its a leading zero to_i will throw it away
+            value = ~value.to_i(2)            # Really its a negative number
         else
-            value = value.to_i(2)  # Just a positive number
+            value = value.to_i(2)             # Just a positive number
         end
-    end
-
-    # Returns the huffman table to use for +component+, and +type+
-    def huffman_table_for_component(component,type)
-        type_id = "#{type}_id".to_sym
-        @huffman_tables[type][@start_of_scan[component][type_id]] or \
-            raise("#{type} #{component} huffman table is nil: 
-                  #{@huffman_tables.inspect} 
-                  start_of_scan: #{@start_of_scan.inspect}")
-    end
-
-    # IMPORTANT NOTE sometimes one DHT marker will have multiple huffman tables inside it
-    def parse_huffman_tables
-        #  HT information (1 byte):
-        #  bit 0..3: number of HT (0..3, otherwise error)
-        #  bit 4   : type of HT, 0 = DC table, 1 = AC table
-        #  bit 5..7: not used, must be 0
-        tables = Hash.new
-        tables[:ac] = Hash.new
-        tables[:dc] = Hash.new
-
-        # Find the type and ID of each huffman table
-        @huffman_tables.each do |table|
-            # If they packed multiple huffman tables in one marker
-            while table.length > 0
-                info_byte = table.shift           # The first byte tells us about the huffman table to follow
-                table_id = info_byte & 0x07       # this SHOULD be 0..3 but sometimes adobe does what they want
-                ac_table = (info_byte & 0x10) > 0 # this bit says if its an AC table
-                table_type = ac_table ? :ac : :dc   # its either AC or DC
-
-                # The first 16 bytes represent the frequency table
-                frequencies = table.shift(16)
-
-                # We need to know how many entries the frequency table needs to be satisfied
-                table_entries = 0
-                frequencies.each do |i|
-                    table_entries += i
-                end
-
-                raise "Malformed huffman table. Missing data presumed
-                entries: #{table_entries} 
-                table: #{table.inspect}
-                frequencies: #{frequencies.inspect}" if table_entries > table.length
-
-                data = table.shift(table_entries)
-                tables[table_type][table_id] = build_huffman_hash(frequencies,data)
-                tables[table_type][table_id][:max_key_length] = tables[table_type][table_id].keys.max{|a, b| a.length <=> b.length}.length
-            end
-        end
-        @huffman_tables = tables
-        return @hufman_tables
-    end
-
-    # Takes the frequency tables and the values from the DHT and returns a hash
-    # with keys matching the path and storing the associated value
-    # E.G. table["100"] => 3 (right,left,left)
-    def build_huffman_hash(frequencies, values)
-        table = Hash.new
-
-        # The number of leading entries in each row to skip because they are "blocked" but leaf nodes in previous rows
-        blocked_entry_count = 0
-
-        frequencies.each_with_index do |frequency, bit_length|
-            # Each_with_index starts at 0, but our frequency table starts at 1
-            bit_length += 1
-            # Each leaf node blocks twice the number of entries in next row
-            blocked_entry_count *= 2
-
-            # Shift off the value of this bit_length
-            row_values = values.shift(frequency)
-
-            row_values.each_with_index do |v, i|
-                # Insert an entry in our hash using the binary tree path as our key
-                table["%0#{bit_length}b" % (i + blocked_entry_count)] = v
-            end
-
-            # Keep track of how many leaf nodes we created so we don't use these positions in subsiquent rows
-            blocked_entry_count += frequency
-        end
-        return table
-    end
-
-    # Extracts the quantization tables from the marker
-    def parse_quantization_tables
-        #NOTE
-        #bit 0..3: number of QT (0..3, otherwise error)
-        #bit 4..7: precision of QT, 0 = 8 bit, otherwise 16 bit
-        tables = Hash.new
-        @quantization_tables.each do |table|
-            # Adobe likes to pack all the quantization tables together
-            while(table.length > 0)
-                info_byte = table.shift
-                table_number = info_byte & 0x0F
-                raise "Quantization table id > 3" if table_number > 3
-                precision = info_byte& 0xF0 > 0 ? 16 : 8 
-
-                if precision == 16
-                    # Reinterpret the 64 chars into 32 shorts
-                    data = table.shift(2 * 64) 
-                    data = data.pack("C*").unpack("n*")
-                else
-                    data = table.shift(64)
-                end
-                tables[table_number] = { :data => data, :precision => precision }
-            end
-        end
-        @quantization_tables = tables
     end
 
     def quantization_table_for_component(component)
@@ -482,8 +506,8 @@ class JPEG
 
     #TODO Blocks are encoded in a zig zag order, for 8x8 this order is 1,2,9,3,10,17....
     #     We need them in real order
-    def zigzag_reorder(mcu_block)
-        mcu_block
+    def zigzag_reorder(index)
+        
     end
 
     def reverse_dct(mcu_block)
@@ -523,9 +547,6 @@ class JPEG
         r_quant_table = quantization_table_for_component(:cr)
 
         @dct.each_slice(3) do |y,b,r|
-            y = zigzag_reorder(y)
-            b = zigzag_reorder(b)
-            r = zigzag_reorder(r)
             y = member_by_member_multiply(y_quant_table,y)
             b = member_by_member_multiply(b_quant_table,b)
             r = member_by_member_multiply(r_quant_table,r)
