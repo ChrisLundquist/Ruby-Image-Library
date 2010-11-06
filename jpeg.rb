@@ -280,7 +280,6 @@ class JPEG
             [:y,:cb,:cr].each do |component|
                 macro_blocks << get_mcu_component(component)
             end
-            puts @scan.length
         end
         @dct = macro_blocks
     end
@@ -298,10 +297,8 @@ class JPEG
         mcu[0] = get_next_dc_scan_value(dc_table)
         index = 1
         while ac_value = get_next_ac_scan_value(ac_table)
-            if ac_value == END_OF_BLOCK
-                break
-            end
-            #puts ac_value
+            break if ac_value == END_OF_BLOCK
+
             # The number of elements to skip is the first nibble
             skip_length = (0xF0 & ac_value) >> 4
             index += skip_length
@@ -310,15 +307,12 @@ class JPEG
             value_length = ac_value & 0x0F
             value = binary_string_to_i(@scan.slice!(0,value_length))
 
-            #puts "skip_length: #{skip_length}"
-            #puts "value_length: #{value_length}"
-            #puts "value: #{value}"
-
             # We should never have more than 64 components in an mcu
             raise "abnormally long mcu\n #{mcu.inspect}\n index #{index}" if index > 64 
             mcu[index] = value
             index += 1
         end
+
         # Each DC value is stored as a delta from the previous
         mcu[0] += @last_dc_value[component]
         @last_dc_value[component] = mcu[0]
@@ -331,7 +325,7 @@ class JPEG
             # AC huffman values are in the form SSSS VVVV
             # where s is the number of entries to skip and VVVV is the length of the next value in @scan
             if ac_value = huffman_table[@scan[0...i]]
-                @scan.slice!(0...i)
+                @scan.slice!(0,i) # We have to throw away this part
                 return ac_value
             end
         end
@@ -359,7 +353,8 @@ class JPEG
 
     # Interprets a signed binary string as a decimal value
     def binary_string_to_i(value)
-        if value[0] == 48          # If its a leading zero to_i will throw it away
+      # Depends on Ruby version
+        if value[0] == 48 or value[0] == "0"         # If its a leading zero to_i will throw it away
             value = ~value.to_i(2) # Really its a negative number
         else
             value = value.to_i(2)  # Just a positive number
@@ -515,7 +510,6 @@ class JPEG
             y.length.times do |i|
                 pixel_group = [y[i],b[i],r[i]]
                 @image += pixel_group
-                print "."
             end
         end
         @image
@@ -539,7 +533,6 @@ class JPEG
             b = reverse_dct(b)
             r = reverse_dct(r)
             @macro_blocks << y << b << r
-            print "."
         end
     end
 end
