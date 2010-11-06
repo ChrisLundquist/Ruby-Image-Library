@@ -292,18 +292,24 @@ class JPEG
         mcu = Hash.new(0)
 
         # The first value encoded is the DC for the component
-        mcu[0] = get_next_scan_value(dc_table)
+        mcu[0] = get_next_dc_scan_value(dc_table)
         index = 1
-        while value = get_next_scan_value(ac_table)
+        while ac_value = get_next_ac_scan_value(ac_table)
+            # The number of elements to skip is the first nibble
+            skip_length = ac_value >> 4
+            index += skip_length
+
+            # The run length code is the lower nibble
+            value_length = ac_value & 0x0F
+            value = binary_string_to_i(@scan.slice!(0,value_length))
             case value
             when END_OF_BLOCK
                 break
-            when ZRL # 16 zeros
-                index += 16
             else
                 # We should never have more than 64 components in an mcu
-                raise "abnormally long mcu" if index > 64 
+                raise "abnormally long mcu\n #{mcu.inspect}\n index #{index}" if index > 64 
                 mcu[index] = value
+                index += 1
             end
         end
         # Each DC value is stored as a delta from the previous
@@ -312,8 +318,20 @@ class JPEG
         mcu
     end
 
+    def get_next_ac_scan_value(huffman_table)
+        huffman_table[:max_key_length].times do |i|
+            i += 1
+            # AC huffman values are in the form SSSS VVVV
+            # where s is the number of entries to skip and VVVV is the length of the next value in @scan
+            if ac_value = huffman_table[@scan[0...i]]
+                return ac_value
+            end
+        end
+        raise "No value found a subset of: #{@scan[0..16].inspect}\nHuffman Table:\n #{huffman_table.inspect}"
+    end
+
     # Reads bits that match our huffman tree's path then reads that many more bits and interprets and returns the value
-    def get_next_scan_value(huffman_table)
+    def get_next_dc_scan_value(huffman_table)
         # Use the longest code of this table
         huffman_table[:max_key_length].times do |i|
             i += 1 # We have to match 1..max not 0..max - 1
@@ -322,14 +340,8 @@ class JPEG
                 # Shift of this valid huffman code from our image
                 huffman_code = @scan.slice!(0, i)
 
-
                 value = @scan.slice!(0, length_of_value)
                 value = binary_string_to_i(value)
-                if value > 80000
-                    puts length_of_value.inspect
-                    puts value
-                    raise 'crazy value' 
-                end
 
                 return value
             end
