@@ -114,8 +114,10 @@ class JPEG
         # decodes the entropy encoded data into MCUs
         parse_scan()
         # Turns the decoded DCTs into ycrcb color space
+        puts "DCTing it up"
         dct_to_ycrcb()
         # We have 2D arrays of macro blocks that we need to turn into a 1d array of pixels
+        puts "Turning it into pixels"
         macro_blocks_to_pixels()
     end
 
@@ -278,6 +280,7 @@ class JPEG
             [:y,:cb,:cr].each do |component|
                 macro_blocks << get_mcu_component(component)
             end
+            puts @scan.length
         end
         @dct = macro_blocks
     end
@@ -295,22 +298,26 @@ class JPEG
         mcu[0] = get_next_dc_scan_value(dc_table)
         index = 1
         while ac_value = get_next_ac_scan_value(ac_table)
+            if ac_value == END_OF_BLOCK
+                break
+            end
+            #puts ac_value
             # The number of elements to skip is the first nibble
-            skip_length = ac_value >> 4
+            skip_length = (0xF0 & ac_value) >> 4
             index += skip_length
 
             # The run length code is the lower nibble
             value_length = ac_value & 0x0F
             value = binary_string_to_i(@scan.slice!(0,value_length))
-            case value
-            when END_OF_BLOCK
-                break
-            else
-                # We should never have more than 64 components in an mcu
-                raise "abnormally long mcu\n #{mcu.inspect}\n index #{index}" if index > 64 
-                mcu[index] = value
-                index += 1
-            end
+
+            #puts "skip_length: #{skip_length}"
+            #puts "value_length: #{value_length}"
+            #puts "value: #{value}"
+
+            # We should never have more than 64 components in an mcu
+            raise "abnormally long mcu\n #{mcu.inspect}\n index #{index}" if index > 64 
+            mcu[index] = value
+            index += 1
         end
         # Each DC value is stored as a delta from the previous
         mcu[0] += @last_dc_value[component]
@@ -324,6 +331,7 @@ class JPEG
             # AC huffman values are in the form SSSS VVVV
             # where s is the number of entries to skip and VVVV is the length of the next value in @scan
             if ac_value = huffman_table[@scan[0...i]]
+                @scan.slice!(0...i)
                 return ac_value
             end
         end
@@ -499,6 +507,7 @@ class JPEG
     end
 
     # Converts the macroblocks into pixels
+    # TODO OPTIMIZE
     def macro_blocks_to_pixels
         @image = Array.new
         @macro_blocks.each_slice(3) do |y,b,r|
@@ -506,6 +515,7 @@ class JPEG
             y.length.times do |i|
                 pixel_group = [y[i],b[i],r[i]]
                 @image += pixel_group
+                print "."
             end
         end
         @image
@@ -529,6 +539,7 @@ class JPEG
             b = reverse_dct(b)
             r = reverse_dct(r)
             @macro_blocks << y << b << r
+            print "."
         end
     end
 end
